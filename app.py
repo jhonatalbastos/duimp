@@ -9,7 +9,7 @@ import pandas as pd
 from datetime import datetime
 
 # --- CONFIGURAÇÕES DE ACESSO (PROTEGIDAS) ---
-# Chaves extraídas do seu print de geração com sucesso
+# Chaves extraídas do seu print de geração com sucesso (image_a8bafd.png)
 CLIENT_ID_SEC = "noQXPhAOi4Vc1J5Z-XAPCS9FmodtME5p"
 CLIENT_SECRET_SEC = "ruV4-tybNVCG9g_-tjcVg3ifE--J1sBK"
 
@@ -47,11 +47,11 @@ def extrair_pfx(pfx_data, password):
 
 def obter_access_token(ambiente, cert_info=None):
     """Troca Client ID/Secret por um Access Token (OAUTH2) com mTLS."""
-    # Definição das URLs de autenticação baseada no ambiente
+    # URLs de autenticação do Serpro para o Portal Único
     if ambiente == "Treinamento":
-        url = "https://val.portalunico.siscomex.gov.br/api/autenticacao/token"
+        url = "https://val.portalunico.siscomex.gov.br/portal/api/autenticacao/token"
     else:
-        url = "https://portalunico.siscomex.gov.br/api/autenticacao/token"
+        url = "https://portalunico.siscomex.gov.br/portal/api/autenticacao/token"
     
     # Credenciais codificadas em Base64
     auth_str = f"{CLIENT_ID_SEC}:{CLIENT_SECRET_SEC}"
@@ -60,10 +60,11 @@ def obter_access_token(ambiente, cert_info=None):
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "Authorization": f"Basic {auth_b64}",
-        "User-Agent": "Streamlit/SiscomexGateway-1.0"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) SiscomexGateway/1.0",
+        "X-Origin-System": "SiscomexGateway"
     }
     
-    # Adicionado o 'scope' que muitas vezes é obrigatório para evitar o 403
+    # Payload específico para o Serpro Gateway
     payload = {
         "grant_type": "client_credentials",
         "scope": "openid"
@@ -76,28 +77,28 @@ def obter_access_token(ambiente, cert_info=None):
             data=payload, 
             headers=headers, 
             cert=cert_info, 
-            timeout=15,
+            timeout=20,
             verify=True
         )
         
         if response.status_code == 200:
             return response.json().get("access_token"), None
         
-        # Tentativa de fallback para a rota legada caso a nova retorne erro
+        # Fallback para endpoint alternativo caso o principal falhe
         if response.status_code in [403, 404]:
-            url_alt = url.replace("/api/", "/portal/api/")
-            response_alt = requests.post(url_alt, data=payload, headers=headers, cert=cert_info, timeout=15)
+            url_alt = url.replace("/portal/api/", "/api/")
+            response_alt = requests.post(url_alt, data=payload, headers=headers, cert=cert_info, timeout=20)
             if response_alt.status_code == 200:
                 return response_alt.json().get("access_token"), None
 
-        return None, f"Erro na geração do Token ({response.status_code}). Certifique-se de que selecionou 'Produção' no app, pois suas chaves são de Produção."
+        return None, f"Erro na geração do Token ({response.status_code})."
     except Exception as e:
         return None, f"Falha de conexão para Token: {str(e)}"
 
 def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password):
     """Realiza o fluxo completo: Autenticação -> Consulta DUIMP."""
     try:
-        # Extração dos dados do certificado para arquivos temporários (exigência do requests)
+        # Extração dos dados do certificado para arquivos temporários
         cert_pem, key_pem = extrair_pfx(pfx_data, pfx_password)
         
         with tempfile.NamedTemporaryFile(delete=False, suffix='.crt') as cert_file, \
@@ -128,17 +129,18 @@ def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password):
                 "Accept": "application/json",
                 "Role-Type": "IMP",
                 "Authorization": f"Bearer {token}",
-                "User-Agent": "Streamlit/SiscomexGateway-1.0"
+                "User-Agent": "Mozilla/5.0 SiscomexGateway/1.0"
             }
 
             response = requests.get(url, headers=headers, cert=cert_info, timeout=30)
 
-        # Limpeza dos arquivos temporários de segurança
+        # Limpeza dos arquivos temporários
         os.unlink(cert_file.name)
         os.unlink(key_file.name)
 
         if response.status_code == 200:
             return response.json(), None
+        
         return None, f"Erro Siscomex ({response.status_code}): {response.text[:300]}"
 
     except Exception as e:
@@ -154,10 +156,10 @@ with st.sidebar:
     pfx_password = st.text_input("Senha do Certificado", type="password")
     
     st.divider()
-    st.info("✅ **Autenticação API Ativa:** Credenciais Client ID e Secret configuradas.")
+    st.info("✅ **Chaves Ativas:** Credenciais Client ID e Secret vinculadas.")
     
     st.header("⚙️ Configuração")
-    # Importante: Como suas chaves são de Produção, selecione Produção no rádio abaixo.
+    # Nota: Suas chaves são de PRODUÇÃO (conforme image_a8bafd.png)
     ambiente = st.radio("Ambiente", ["Produção", "Treinamento"])
     
     st.divider()
@@ -168,19 +170,18 @@ if btn_consultar:
     if not uploaded_pfx or not pfx_password or not numero_duimp:
         st.error("⚠️ Preencha todos os campos: Certificado, Senha e Número da DUIMP.")
     else:
-        with st.spinner("🔒 Autenticando com Serpro e Consultando DUIMP..."):
-            # Lemos o conteúdo do arquivo uma vez
+        with st.spinner("🔒 Conectando ao Servidor Serpro..."):
             pfx_bytes = uploaded_pfx.read()
             dados, erro = consultar_siscomex(numero_duimp, ambiente, pfx_bytes, pfx_password)
 
             if erro:
                 st.error(f"❌ Falha: {erro}")
                 if "403" in erro:
-                    st.warning("**Importante:** Suas chaves de acesso foram geradas no ambiente de PRODUÇÃO. Certifique-se de selecionar 'Produção' no rádio da esquerda.")
+                    st.warning("**Causa Comum:** Se você estiver em 'Produção', verifique se o certificado A1 carregado pertence ao mesmo CNPJ/CPF que gerou o par de chaves no Portal Único.")
             elif dados:
-                st.success("✅ Dados recuperados com sucesso!")
+                st.success("✅ Consulta realizada com sucesso!")
                 
-                # Extração básica de dados para o Dashboard
+                # Dashboard de resultados
                 ident = dados.get('identificacao', {})
                 carga = dados.get('carga', {})
                 itens = dados.get('itens', [])
@@ -192,17 +193,17 @@ if btn_consultar:
                 valor_total = sum(item.get('valorDolar', 0) for item in itens)
                 col3.metric("Valor Total (USD)", f"$ {valor_total:,.2f}")
 
-                tab1, tab2 = st.tabs(["📋 Resumo Detalhado", "🛠️ Resposta JSON (Técnico)"])
+                tab1, tab2 = st.tabs(["📋 Detalhes Operacionais", "🛠️ Resposta Técnica (JSON)"])
                 with tab1:
                     resumo_data = [
-                        {"Campo": "Número DUIMP", "Valor": ident.get('numero', 'N/A')},
-                        {"Campo": "Data de Registro", "Valor": ident.get('dataRegistro', 'N/A')},
-                        {"Campo": "Unidade Local", "Valor": carga.get('uol', 'N/A')},
-                        {"Campo": "Qtd Itens", "Valor": len(itens)}
+                        {"Campo": "Número DUIMP", "Value": ident.get('numero', 'N/A')},
+                        {"Campo": "Data Registro", "Value": ident.get('dataRegistro', 'N/A')},
+                        {"Campo": "Local", "Value": carga.get('uol', 'N/A')},
+                        {"Campo": "Incoterm", "Value": carga.get('incoterm', 'N/A')}
                     ]
                     st.table(pd.DataFrame(resumo_data))
                 with tab2:
                     st.json(dados)
 
 st.divider()
-st.caption(f"© {datetime.now().year} - Siscomex Gateway | Acesso via API Serpro Protegido")
+st.caption(f"© {datetime.now().year} - Siscomex Gateway | Conexão Segura mTLS via Serpro")
