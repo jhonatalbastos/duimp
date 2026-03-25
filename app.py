@@ -47,20 +47,38 @@ def extrair_pfx(pfx_data, password):
 
 def obter_access_token(ambiente):
     """Troca Client ID/Secret por um Access Token (OAUTH2)."""
-    url = "https://portalunico.siscomex.gov.br/portal/api/autenticacao/token"
+    # Ajuste da URL de autenticação: Removido o path '/portal/api' que causava 404
     if ambiente == "Treinamento":
-        url = "https://val.portalunico.siscomex.gov.br/portal/api/autenticacao/token"
+        url = "https://val.portalunico.siscomex.gov.br/api/autenticacao/token"
+    else:
+        url = "https://portalunico.siscomex.gov.br/api/autenticacao/token"
+    
+    # Credenciais em Base64 para o Header Basic
+    auth_str = f"{CLIENT_ID_SEC}:{CLIENT_SECRET_SEC}"
+    auth_b64 = base64.b64encode(auth_str.encode()).decode()
     
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
-        "Authorization": "Basic " + base64.b64encode(f"{CLIENT_ID_SEC}:{CLIENT_SECRET_SEC}".encode()).decode()
+        "Authorization": f"Basic {auth_b64}"
     }
     
+    payload = {"grant_type": "client_credentials"}
+    
     try:
-        response = requests.post(url, data={"grant_type": "client_credentials"}, headers=headers, timeout=15)
+        # Nota: A autenticação de token às vezes também exige o certificado mTLS dependendo da política do Serpro
+        response = requests.post(url, data=payload, headers=headers, timeout=15)
+        
         if response.status_code == 200:
             return response.json().get("access_token"), None
-        return None, f"Erro na geração do Token (Status {response.status_code})"
+        
+        # Caso o erro 404 persista, tentamos a rota alternativa legada
+        if response.status_code == 404:
+            url_alt = url.replace("/api/", "/portal/api/")
+            response = requests.post(url_alt, data=payload, headers=headers, timeout=15)
+            if response.status_code == 200:
+                return response.json().get("access_token"), None
+
+        return None, f"Erro na geração do Token (Status {response.status_code}): {response.text}"
     except Exception as e:
         return None, f"Falha de conexão para Token: {str(e)}"
 
@@ -75,9 +93,10 @@ def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password):
         # 2. Preparar mTLS
         cert_pem, key_pem = extrair_pfx(pfx_data, pfx_password)
         
-        base_url = "https://portalunico.siscomex.gov.br/duimp/api/duimps"
         if ambiente == "Treinamento":
             base_url = "https://val.portalunico.siscomex.gov.br/duimp/api/duimps"
+        else:
+            base_url = "https://portalunico.siscomex.gov.br/duimp/api/duimps"
         
         url = f"{base_url}/{numero_duimp}"
 
