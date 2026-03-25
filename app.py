@@ -9,6 +9,7 @@ import pandas as pd
 from datetime import datetime
 
 # --- CONFIGURAÇÕES DE ACESSO (PROTEGIDAS) ---
+# Chaves extraídas do seu print de geração com sucesso
 CLIENT_ID_SEC = "noQXPhAOi4Vc1J5Z-XAPCS9FmodtME5p"
 CLIENT_SECRET_SEC = "ruV4-tybNVCG9g_-tjcVg3ifE--J1sBK"
 
@@ -19,7 +20,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Estilização CSS
+# Estilização CSS para um visual profissional
 st.markdown("""
     <style>
     .main { background-color: #f8f9fa; }
@@ -28,7 +29,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 def extrair_pfx(pfx_data, password):
-    """Extrai certificado e chave privada para mTLS."""
+    """Extrai certificado e chave privada para mTLS usando a biblioteca cryptography."""
     try:
         private_key, certificate, _ = pkcs12.load_key_and_certificates(
             pfx_data,
@@ -45,26 +46,31 @@ def extrair_pfx(pfx_data, password):
         raise Exception(f"Erro no Certificado: Verifique a senha. ({str(e)})")
 
 def obter_access_token(ambiente, cert_info=None):
-    """Troca Client ID/Secret por um Access Token (OAUTH2)."""
-    # URLs exatas para o fluxo de autenticação do Portal Único
+    """Troca Client ID/Secret por um Access Token (OAUTH2) com mTLS."""
+    # Definição das URLs de autenticação baseada no ambiente
     if ambiente == "Treinamento":
-        url = "https://val.portalunico.siscomex.gov.br/portal/api/autenticacao/token"
+        url = "https://val.portalunico.siscomex.gov.br/api/autenticacao/token"
     else:
-        url = "https://portalunico.siscomex.gov.br/portal/api/autenticacao/token"
+        url = "https://portalunico.siscomex.gov.br/api/autenticacao/token"
     
+    # Credenciais codificadas em Base64
     auth_str = f"{CLIENT_ID_SEC}:{CLIENT_SECRET_SEC}"
     auth_b64 = base64.b64encode(auth_str.encode()).decode()
     
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "Authorization": f"Basic {auth_b64}",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) SiscomexGateway/1.0"
+        "User-Agent": "Streamlit/SiscomexGateway-1.0"
     }
     
-    payload = {"grant_type": "client_credentials"}
+    # Adicionado o 'scope' que muitas vezes é obrigatório para evitar o 403
+    payload = {
+        "grant_type": "client_credentials",
+        "scope": "openid"
+    }
     
     try:
-        # A autenticação mTLS é mandatória em Produção
+        # A requisição de token em Produção EXIGE o certificado A1 junto (mTLS)
         response = requests.post(
             url, 
             data=payload, 
@@ -77,20 +83,21 @@ def obter_access_token(ambiente, cert_info=None):
         if response.status_code == 200:
             return response.json().get("access_token"), None
         
-        # Tenta URL sem o /portal se der 404/403
+        # Tentativa de fallback para a rota legada caso a nova retorne erro
         if response.status_code in [403, 404]:
-            url_alt = url.replace("/portal/api/", "/api/")
+            url_alt = url.replace("/api/", "/portal/api/")
             response_alt = requests.post(url_alt, data=payload, headers=headers, cert=cert_info, timeout=15)
             if response_alt.status_code == 200:
                 return response_alt.json().get("access_token"), None
 
-        return None, f"Erro na geração do Token ({response.status_code}): {response.text[:200]}"
+        return None, f"Erro na geração do Token ({response.status_code}). Certifique-se de que selecionou 'Produção' no app, pois suas chaves são de Produção."
     except Exception as e:
         return None, f"Falha de conexão para Token: {str(e)}"
 
 def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password):
-    """Consulta a DUIMP usando mTLS + Access Token."""
+    """Realiza o fluxo completo: Autenticação -> Consulta DUIMP."""
     try:
+        # Extração dos dados do certificado para arquivos temporários (exigência do requests)
         cert_pem, key_pem = extrair_pfx(pfx_data, pfx_password)
         
         with tempfile.NamedTemporaryFile(delete=False, suffix='.crt') as cert_file, \
@@ -103,14 +110,14 @@ def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password):
             
             cert_info = (cert_file.name, key_file.name)
 
-            # 1. Obter o Token
+            # Etapa 1: Obtenção do Access Token
             token, erro_token = obter_access_token(ambiente, cert_info)
             if erro_token:
                 os.unlink(cert_file.name)
                 os.unlink(key_file.name)
                 return None, erro_token
 
-            # 2. Consultar DUIMP
+            # Etapa 2: Consulta à API da DUIMP
             if ambiente == "Treinamento":
                 base_url = "https://val.portalunico.siscomex.gov.br/duimp/api/duimps"
             else:
@@ -121,22 +128,23 @@ def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password):
                 "Accept": "application/json",
                 "Role-Type": "IMP",
                 "Authorization": f"Bearer {token}",
-                "User-Agent": "Mozilla/5.0 SiscomexGateway/1.0"
+                "User-Agent": "Streamlit/SiscomexGateway-1.0"
             }
 
             response = requests.get(url, headers=headers, cert=cert_info, timeout=30)
 
+        # Limpeza dos arquivos temporários de segurança
         os.unlink(cert_file.name)
         os.unlink(key_file.name)
 
         if response.status_code == 200:
             return response.json(), None
-        return None, f"Erro Siscomex ({response.status_code}): {response.text[:200]}"
+        return None, f"Erro Siscomex ({response.status_code}): {response.text[:300]}"
 
     except Exception as e:
         return None, str(e)
 
-# --- INTERFACE ---
+# --- INTERFACE DO USUÁRIO ---
 st.title("🚢 Siscomex Gateway | Consulta Direta DUIMP")
 st.markdown("---")
 
@@ -146,10 +154,10 @@ with st.sidebar:
     pfx_password = st.text_input("Senha do Certificado", type="password")
     
     st.divider()
-    st.info("✅ **Autenticação API Ativa:** Credenciais configuradas internamente.")
+    st.info("✅ **Autenticação API Ativa:** Credenciais Client ID e Secret configuradas.")
     
     st.header("⚙️ Configuração")
-    # No seu print anterior, o perfil ativo era Produção (PRD)
+    # Importante: Como suas chaves são de Produção, selecione Produção no rádio abaixo.
     ambiente = st.radio("Ambiente", ["Produção", "Treinamento"])
     
     st.divider()
@@ -158,36 +166,43 @@ with st.sidebar:
 
 if btn_consultar:
     if not uploaded_pfx or not pfx_password or not numero_duimp:
-        st.error("⚠️ Preencha o certificado, a senha e o número da DUIMP.")
+        st.error("⚠️ Preencha todos os campos: Certificado, Senha e Número da DUIMP.")
     else:
-        with st.spinner("🔒 Autenticando e Consultando..."):
-            dados, erro = consultar_siscomex(numero_duimp, ambiente, uploaded_pfx.read(), pfx_password)
+        with st.spinner("🔒 Autenticando com Serpro e Consultando DUIMP..."):
+            # Lemos o conteúdo do arquivo uma vez
+            pfx_bytes = uploaded_pfx.read()
+            dados, erro = consultar_siscomex(numero_duimp, ambiente, pfx_bytes, pfx_password)
 
             if erro:
                 st.error(f"❌ Falha: {erro}")
                 if "403" in erro:
-                    st.warning("Dica: Verifique se o seu Certificado A1 está cadastrado no Portal Único e se você gerou as chaves no ambiente de Produção.")
+                    st.warning("**Importante:** Suas chaves de acesso foram geradas no ambiente de PRODUÇÃO. Certifique-se de selecionar 'Produção' no rádio da esquerda.")
             elif dados:
-                st.success("✅ Sucesso!")
+                st.success("✅ Dados recuperados com sucesso!")
+                
+                # Extração básica de dados para o Dashboard
                 ident = dados.get('identificacao', {})
                 carga = dados.get('carga', {})
+                itens = dados.get('itens', [])
                 
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Situação", ident.get('situacao', 'N/A'))
                 col2.metric("Peso Bruto", f"{carga.get('pesoBruto', 0)} KG")
                 
-                valor_total = sum(item.get('valorDolar', 0) for item in dados.get('itens', []))
+                valor_total = sum(item.get('valorDolar', 0) for item in itens)
                 col3.metric("Valor Total (USD)", f"$ {valor_total:,.2f}")
 
-                tab1, tab2 = st.tabs(["📋 Resumo", "🛠️ JSON Bruto"])
+                tab1, tab2 = st.tabs(["📋 Resumo Detalhado", "🛠️ Resposta JSON (Técnico)"])
                 with tab1:
-                    st.table(pd.DataFrame([
-                        {"Campo": "Número", "Valor": ident.get('numero', 'N/A')},
-                        {"Campo": "Data", "Valor": ident.get('dataRegistro', 'N/A')},
-                        {"Campo": "UOL", "Valor": carga.get('uol', 'N/A')}
-                    ]))
+                    resumo_data = [
+                        {"Campo": "Número DUIMP", "Valor": ident.get('numero', 'N/A')},
+                        {"Campo": "Data de Registro", "Valor": ident.get('dataRegistro', 'N/A')},
+                        {"Campo": "Unidade Local", "Valor": carga.get('uol', 'N/A')},
+                        {"Campo": "Qtd Itens", "Valor": len(itens)}
+                    ]
+                    st.table(pd.DataFrame(resumo_data))
                 with tab2:
                     st.json(dados)
 
 st.divider()
-st.caption(f"© {datetime.now().year} - Siscomex Gateway | Acesso Restrito")
+st.caption(f"© {datetime.now().year} - Siscomex Gateway | Acesso via API Serpro Protegido")
