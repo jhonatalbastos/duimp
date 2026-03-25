@@ -28,7 +28,7 @@ def extrair_pfx(pfx_data, password):
     Extrai certificado e chave privada de um arquivo PFX/P12 usando a biblioteca cryptography.
     """
     try:
-        # Carrega o PFX usando a biblioteca cryptography (mais moderna que pyOpenSSL)
+        # Carrega o PFX usando a biblioteca cryptography
         private_key, certificate, additional_certificates = pkcs12.load_key_and_certificates(
             pfx_data,
             password.encode() if password else None
@@ -52,14 +52,15 @@ def extrair_pfx(pfx_data, password):
 
 def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password, token):
     """
-    Realiza a chamada mTLS real ao Portal Único Siscomex.
+    Realiza a chamada mTLS real ao Portal Único Siscomex ajustada para a API v1.
     """
     try:
         cert_pem, key_pem = extrair_pfx(pfx_data, pfx_password)
         
-        base_url = "https://portalunico.siscomex.gov.br/duimp/api/duimps"
+        # Ajuste da URL para incluir a versão da API (/v1/) que costuma resolver erros 404 de resource
+        base_url = "https://portalunico.siscomex.gov.br/duimp/api/v1/duimps"
         if ambiente == "Treinamento":
-            base_url = "https://val.portalunico.siscomex.gov.br/duimp/api/duimps"
+            base_url = "https://val.portalunico.siscomex.gov.br/duimp/api/v1/duimps"
         
         url = f"{base_url}/{numero_duimp}"
 
@@ -92,7 +93,13 @@ def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password, token):
         if response.status_code == 200:
             return response.json(), None
         else:
-            return None, f"Erro Siscomex ({response.status_code}): {response.text}"
+            # Melhora a exibição do erro 404 para diagnóstico
+            try:
+                error_data = response.json()
+                msg = error_data.get('message', response.text)
+            except:
+                msg = response.text
+            return None, f"Erro Siscomex ({response.status_code}): {msg}"
 
     except Exception as e:
         return None, str(e)
@@ -133,13 +140,19 @@ if btn_consultar:
 
             if erro:
                 st.error(f"❌ Falha na Consulta: {erro}")
+                st.info("Dica: Verifique se o número da DUIMP está correto e se o Token de Acesso é válido para este ambiente.")
             elif dados:
                 st.success("✅ Dados recuperados com sucesso!")
                 
                 # Dashboard de Métricas
                 col1, col2, col3 = st.columns(3)
-                col1.metric("Situação", dados.get('identificacao', {}).get('situacao', 'N/A'))
-                col2.metric("Peso Bruto", f"{dados.get('carga', {}).get('pesoBruto', 0)} KG")
+                
+                # Tratamento de dados aninhados para evitar erros de exibição
+                ident = dados.get('identificacao', {})
+                carga = dados.get('carga', {})
+                
+                col1.metric("Situação", ident.get('situacao', 'N/A'))
+                col2.metric("Peso Bruto", f"{carga.get('pesoBruto', 0)} KG")
                 
                 valor_total = sum(item.get('valorDolar', 0) for item in dados.get('itens', []))
                 col3.metric("Valor Total (USD)", f"$ {valor_total:,.2f}")
@@ -150,11 +163,11 @@ if btn_consultar:
                 with tab1:
                     st.subheader("Dados de Identificação e Carga")
                     df_resumo = pd.DataFrame([
-                        {"Campo": "Número DUIMP", "Valor": dados['identificacao']['numero']},
-                        {"Campo": "Data Registro", "Valor": dados['identificacao']['dataRegistro']},
-                        {"Campo": "Unidade Aduaneira", "Valor": dados['carga']['uol']},
-                        {"Campo": "Via Transporte", "Valor": dados['carga']['viaTransporte']},
-                        {"Campo": "Incoterm", "Valor": dados['carga']['incoterm']}
+                        {"Campo": "Número DUIMP", "Valor": ident.get('numero', 'N/A')},
+                        {"Campo": "Data Registro", "Valor": ident.get('dataRegistro', 'N/A')},
+                        {"Campo": "Unidade Aduaneira", "Valor": carga.get('uol', 'N/A')},
+                        {"Campo": "Via Transporte", "Valor": carga.get('viaTransporte', 'N/A')},
+                        {"Campo": "Incoterm", "Valor": carga.get('incoterm', 'N/A')}
                     ])
                     st.table(df_resumo)
 
