@@ -9,7 +9,6 @@ import pandas as pd
 from datetime import datetime
 
 # --- CONFIGURAÇÕES DE ACESSO (PROTEGIDAS) ---
-# Os códigos fornecidos foram embutidos diretamente para evitar exposição na interface
 CLIENT_ID_SEC = "noQXPhAOi4Vc1J5Z-XAPCS9FmodtME5p"
 CLIENT_SECRET_SEC = "ruV4-tybNVCG9g_-tjcVg3ifE--J1sBK"
 
@@ -45,15 +44,13 @@ def extrair_pfx(pfx_data, password):
     except Exception as e:
         raise Exception(f"Erro no Certificado: Verifique a senha. ({str(e)})")
 
-def obter_access_token(ambiente):
-    """Troca Client ID/Secret por um Access Token (OAUTH2)."""
-    # Ajuste da URL de autenticação: Removido o path '/portal/api' que causava 404
+def obter_access_token(ambiente, cert_info=None):
+    """Troca Client ID/Secret por um Access Token, enviando mTLS se disponível."""
     if ambiente == "Treinamento":
         url = "https://val.portalunico.siscomex.gov.br/api/autenticacao/token"
     else:
         url = "https://portalunico.siscomex.gov.br/api/autenticacao/token"
     
-    # Credenciais em Base64 para o Header Basic
     auth_str = f"{CLIENT_ID_SEC}:{CLIENT_SECRET_SEC}"
     auth_b64 = base64.b64encode(auth_str.encode()).decode()
     
@@ -65,41 +62,35 @@ def obter_access_token(ambiente):
     payload = {"grant_type": "client_credentials"}
     
     try:
-        # Nota: A autenticação de token às vezes também exige o certificado mTLS dependendo da política do Serpro
-        response = requests.post(url, data=payload, headers=headers, timeout=15)
+        # Tenta autenticar enviando o certificado (mTLS), que resolve o erro 403 em muitos casos
+        response = requests.post(
+            url, 
+            data=payload, 
+            headers=headers, 
+            cert=cert_info, 
+            timeout=15
+        )
         
         if response.status_code == 200:
             return response.json().get("access_token"), None
         
-        # Caso o erro 404 persista, tentamos a rota alternativa legada
+        # Caso 404, tenta a rota alternativa
         if response.status_code == 404:
             url_alt = url.replace("/api/", "/portal/api/")
-            response = requests.post(url_alt, data=payload, headers=headers, timeout=15)
+            response = requests.post(url_alt, data=payload, headers=headers, cert=cert_info, timeout=15)
             if response.status_code == 200:
                 return response.json().get("access_token"), None
 
-        return None, f"Erro na geração do Token (Status {response.status_code}): {response.text}"
+        return None, f"Erro na geração do Token ({response.status_code}). Verifique se o ambiente (Produção/Treinamento) condiz com a chave gerada."
     except Exception as e:
         return None, f"Falha de conexão para Token: {str(e)}"
 
 def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password):
-    """Consulta a DUIMP usando mTLS + Access Token obtido automaticamente."""
+    """Consulta a DUIMP usando mTLS + Access Token."""
     try:
-        # 1. Obter o Token dinamicamente
-        token, erro_token = obter_access_token(ambiente)
-        if erro_token:
-            return None, erro_token
-
-        # 2. Preparar mTLS
+        # Extrair certificado uma vez para usar em ambas as chamadas
         cert_pem, key_pem = extrair_pfx(pfx_data, pfx_password)
         
-        if ambiente == "Treinamento":
-            base_url = "https://val.portalunico.siscomex.gov.br/duimp/api/duimps"
-        else:
-            base_url = "https://portalunico.siscomex.gov.br/duimp/api/duimps"
-        
-        url = f"{base_url}/{numero_duimp}"
-
         with tempfile.NamedTemporaryFile(delete=False, suffix='.crt') as cert_file, \
              tempfile.NamedTemporaryFile(delete=False, suffix='.key') as key_file:
             
@@ -107,19 +98,29 @@ def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password):
             key_file.write(key_pem)
             cert_file.flush()
             key_file.flush()
+            
+            cert_info = (cert_file.name, key_file.name)
 
+            # 1. Obter o Token usando mTLS
+            token, erro_token = obter_access_token(ambiente, cert_info)
+            if erro_token:
+                os.unlink(cert_file.name)
+                os.unlink(key_file.name)
+                return None, erro_token
+
+            # 2. Consultar DUIMP
+            base_url = "https://portalunico.siscomex.gov.br/duimp/api/duimps"
+            if ambiente == "Treinamento":
+                base_url = "https://val.portalunico.siscomex.gov.br/duimp/api/duimps"
+            
+            url = f"{base_url}/{numero_duimp}"
             headers = {
                 "Accept": "application/json",
                 "Role-Type": "IMP",
                 "Authorization": f"Bearer {token}"
             }
 
-            response = requests.get(
-                url,
-                headers=headers,
-                cert=(cert_file.name, key_file.name),
-                timeout=30
-            )
+            response = requests.get(url, headers=headers, cert=cert_info, timeout=30)
 
         os.unlink(cert_file.name)
         os.unlink(key_file.name)
@@ -141,10 +142,10 @@ with st.sidebar:
     pfx_password = st.text_input("Senha do Certificado", type="password")
     
     st.divider()
-    st.info("✅ **Autenticação API Ativa:** Client ID e Secret configurados internamente.")
+    st.info("✅ **Autenticação API Ativa:** Credenciais configuradas internamente.")
     
     st.header("⚙️ Configuração")
-    ambiente = st.radio("Ambiente", ["Produção", "Treinamento"])
+    ambiente = st.radio("Ambiente", ["Produção", "Treinamento"], help="Certifique-se de que a sua chave foi gerada no ambiente selecionado.")
     
     st.divider()
     numero_duimp = st.text_input("Número da DUIMP", placeholder="Ex: 26BR00001720636").upper().strip()
@@ -154,7 +155,7 @@ if btn_consultar:
     if not uploaded_pfx or not pfx_password or not numero_duimp:
         st.error("⚠️ Preencha o certificado, a senha e o número da DUIMP.")
     else:
-        with st.spinner("🔒 Autenticando e Consultando..."):
+        with st.spinner("🔒 Autenticando com mTLS e Consultando..."):
             dados, erro = consultar_siscomex(numero_duimp, ambiente, uploaded_pfx.read(), pfx_password)
 
             if erro:
