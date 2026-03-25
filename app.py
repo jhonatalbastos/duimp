@@ -47,31 +47,32 @@ def extrair_pfx(pfx_data, password):
 
 def obter_access_token(ambiente, cert_info=None):
     """Troca Client ID/Secret por um Access Token (OAUTH2) com mTLS."""
-    # URLs de autenticação do Serpro para o Portal Único
+    # URLs de autenticação baseadas no comportamento observado (image_a8c926.png e image_a8cd43.png)
     if ambiente == "Treinamento":
-        url = "https://val.portalunico.siscomex.gov.br/portal/api/autenticacao/token"
+        url = "https://val.portalunico.siscomex.gov.br/api/autenticacao/token"
     else:
-        url = "https://portalunico.siscomex.gov.br/portal/api/autenticacao/token"
+        # Tentativa no endpoint padrão de produção
+        url = "https://portalunico.siscomex.gov.br/api/autenticacao/token"
     
-    # Credenciais codificadas em Base64
+    # Credenciais codificadas em Base64 para Basic Auth
     auth_str = f"{CLIENT_ID_SEC}:{CLIENT_SECRET_SEC}"
     auth_b64 = base64.b64encode(auth_str.encode()).decode()
     
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "Authorization": f"Basic {auth_b64}",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) SiscomexGateway/1.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) SiscomexGateway/1.1",
         "X-Origin-System": "SiscomexGateway"
     }
     
-    # Payload específico para o Serpro Gateway
+    # O Serpro exige grant_type e scope para openid
     payload = {
         "grant_type": "client_credentials",
         "scope": "openid"
     }
     
     try:
-        # A requisição de token em Produção EXIGE o certificado A1 junto (mTLS)
+        # A requisição de token exige o certificado A1 junto (mTLS)
         response = requests.post(
             url, 
             data=payload, 
@@ -81,17 +82,15 @@ def obter_access_token(ambiente, cert_info=None):
             verify=True
         )
         
+        # Se 404, tentar a URL alternativa que inclui /portal/
+        if response.status_code == 404:
+            url_alt = url.replace("/api/", "/portal/api/")
+            response = requests.post(url_alt, data=payload, headers=headers, cert=cert_info, timeout=20)
+
         if response.status_code == 200:
             return response.json().get("access_token"), None
         
-        # Fallback para endpoint alternativo caso o principal falhe
-        if response.status_code in [403, 404]:
-            url_alt = url.replace("/portal/api/", "/api/")
-            response_alt = requests.post(url_alt, data=payload, headers=headers, cert=cert_info, timeout=20)
-            if response_alt.status_code == 200:
-                return response_alt.json().get("access_token"), None
-
-        return None, f"Erro na geração do Token ({response.status_code})."
+        return None, f"Erro na geração do Token ({response.status_code}): {response.text[:100]}"
     except Exception as e:
         return None, f"Falha de conexão para Token: {str(e)}"
 
@@ -127,9 +126,9 @@ def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password):
             url = f"{base_url}/{numero_duimp}"
             headers = {
                 "Accept": "application/json",
-                "Role-Type": "IMP",
+                "Role-Type": "IMP", # Perfil de Importador conforme image_a8b737.png
                 "Authorization": f"Bearer {token}",
-                "User-Agent": "Mozilla/5.0 SiscomexGateway/1.0"
+                "User-Agent": "Mozilla/5.0 SiscomexGateway/1.1"
             }
 
             response = requests.get(url, headers=headers, cert=cert_info, timeout=30)
@@ -159,7 +158,6 @@ with st.sidebar:
     st.info("✅ **Chaves Ativas:** Credenciais Client ID e Secret vinculadas.")
     
     st.header("⚙️ Configuração")
-    # Nota: Suas chaves são de PRODUÇÃO (conforme image_a8bafd.png)
     ambiente = st.radio("Ambiente", ["Produção", "Treinamento"])
     
     st.divider()
@@ -170,14 +168,16 @@ if btn_consultar:
     if not uploaded_pfx or not pfx_password or not numero_duimp:
         st.error("⚠️ Preencha todos os campos: Certificado, Senha e Número da DUIMP.")
     else:
-        with st.spinner("🔒 Conectando ao Servidor Serpro..."):
+        with st.spinner("🔒 Autenticando com Certificado A1..."):
             pfx_bytes = uploaded_pfx.read()
             dados, erro = consultar_siscomex(numero_duimp, ambiente, pfx_bytes, pfx_password)
 
             if erro:
                 st.error(f"❌ Falha: {erro}")
                 if "403" in erro:
-                    st.warning("**Causa Comum:** Se você estiver em 'Produção', verifique se o certificado A1 carregado pertence ao mesmo CNPJ/CPF que gerou o par de chaves no Portal Único.")
+                    st.warning("**Atenção:** O erro 403 indica que o certificado A1 carregado não tem permissão para usar o par de chaves Client ID/Secret configurado. Certifique-se de que o certificado é do mesmo CNPJ da conta no Portal Único.")
+                if "404" in erro:
+                    st.info("O servidor retornou 404. Verifique se o número da DUIMP está correto e se o ambiente selecionado é o mesmo onde a DUIMP foi registrada.")
             elif dados:
                 st.success("✅ Consulta realizada com sucesso!")
                 
