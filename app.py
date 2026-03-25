@@ -2,7 +2,8 @@ import streamlit as st
 import requests
 import tempfile
 import os
-from OpenSSL import crypto
+from cryptography.hazmat.primitives.serialization import pkcs12
+from cryptography.hazmat.primitives import serialization
 import pandas as pd
 from datetime import datetime
 
@@ -24,15 +25,30 @@ st.markdown("""
 
 def extrair_pfx(pfx_data, password):
     """
-    Extrai certificado e chave privada de um ficheiro PFX/P12 para uso no requests.
+    Extrai certificado e chave privada de um arquivo PFX/P12 usando a biblioteca cryptography.
     """
     try:
-        pfx = crypto.load_pkcs12(pfx_data, password.encode())
-        cert = crypto.dump_certificate(crypto.FILETYPE_PEM, pfx.get_certificate())
-        key = crypto.dump_privatekey(crypto.FILETYPE_PEM, pfx.get_privatekey())
-        return cert, key
+        # Carrega o PFX usando a biblioteca cryptography (mais moderna que pyOpenSSL)
+        private_key, certificate, additional_certificates = pkcs12.load_key_and_certificates(
+            pfx_data,
+            password.encode() if password else None
+        )
+        
+        # Converte a chave privada para formato PEM
+        key_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        )
+        
+        # Converte o certificado para formato PEM
+        cert_pem = certificate.public_bytes(
+            encoding=serialization.Encoding.PEM
+        )
+        
+        return cert_pem, key_pem
     except Exception as e:
-        raise Exception(f"Erro ao descodificar PFX: Verifique a senha. ({str(e)})")
+        raise Exception(f"Erro ao decodificar PFX: Verifique a senha ou o formato do arquivo. ({str(e)})")
 
 def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password, token):
     """
@@ -47,7 +63,7 @@ def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password, token):
         
         url = f"{base_url}/{numero_duimp}"
 
-        # Criar ficheiros temporários para o mTLS (o requests exige caminhos no disco)
+        # Criar arquivos temporários para o mTLS
         with tempfile.NamedTemporaryFile(delete=False, suffix='.crt') as cert_file, \
              tempfile.NamedTemporaryFile(delete=False, suffix='.key') as key_file:
             
@@ -158,9 +174,9 @@ else:
     
     st.markdown("""
     ### 🛡️ Segurança e Privacidade
-    * **Processamento em Memória**: O seu ficheiro PFX e a senha são processados apenas durante a execução da consulta.
+    * **Processamento em Memória**: O seu arquivo PFX e a senha são processados apenas durante a execução da consulta.
     * **Sem Armazenamento**: Os dados não são guardados em base de dados.
-    * **Conexão HTTPS**: O Streamlit Cloud garante que a comunicação entre o seu browser e este servidor é cifrada.
+    * **Conexão HTTPS**: O Streamlit Cloud garante que a comunicação entre o seu navegador e este servidor é criptografada.
     """)
 
 st.divider()
