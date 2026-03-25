@@ -28,20 +28,17 @@ def extrair_pfx(pfx_data, password):
     Extrai certificado e chave privada de um arquivo PFX/P12 usando a biblioteca cryptography.
     """
     try:
-        # Carrega o PFX usando a biblioteca cryptography
         private_key, certificate, additional_certificates = pkcs12.load_key_and_certificates(
             pfx_data,
             password.encode() if password else None
         )
         
-        # Converte a chave privada para formato PEM
         key_pem = private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption()
         )
         
-        # Converte o certificado para formato PEM
         cert_pem = certificate.public_bytes(
             encoding=serialization.Encoding.PEM
         )
@@ -52,19 +49,22 @@ def extrair_pfx(pfx_data, password):
 
 def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password, token):
     """
-    Realiza a chamada mTLS real ao Portal Único Siscomex ajustada para a API v1.
+    Realiza a chamada mTLS ao Portal Único Siscomex com URL e Headers corrigidos.
     """
     try:
         cert_pem, key_pem = extrair_pfx(pfx_data, pfx_password)
         
-        # Ajuste da URL para incluir a versão da API (/v1/) que costuma resolver erros 404 de resource
-        base_url = "https://portalunico.siscomex.gov.br/duimp/api/v1/duimps"
-        if ambiente == "Treinamento":
-            base_url = "https://val.portalunico.siscomex.gov.br/duimp/api/v1/duimps"
+        # Formatação do Token: O Siscomex exige o prefixo 'Bearer ' antes do token
+        auth_header = token if token.startswith("Bearer ") else f"Bearer {token}"
+        
+        # URL conforme manual de integração (sem o /v1/ que causou o 404 anterior)
+        if ambiente == "Produção":
+            base_url = "https://portalunico.siscomex.gov.br/duimp/api/duimps"
+        else:
+            base_url = "https://val.portalunico.siscomex.gov.br/duimp/api/duimps"
         
         url = f"{base_url}/{numero_duimp}"
 
-        # Criar arquivos temporários para o mTLS
         with tempfile.NamedTemporaryFile(delete=False, suffix='.crt') as cert_file, \
              tempfile.NamedTemporaryFile(delete=False, suffix='.key') as key_file:
             
@@ -76,8 +76,11 @@ def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password, token):
             headers = {
                 "Accept": "application/json",
                 "Role-Type": "IMP",
-                "Authorization": f"Bearer {token}" if token else ""
+                "Authorization": auth_header
             }
+
+            # Debug visual (opcional, ajuda a ver o que está sendo enviado)
+            # st.write(f"DEBUG - Chamando URL: {url}")
 
             response = requests.get(
                 url,
@@ -86,14 +89,16 @@ def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password, token):
                 timeout=30
             )
 
-        # Limpeza imediata dos certificados temporários
         os.unlink(cert_file.name)
         os.unlink(key_file.name)
 
         if response.status_code == 200:
             return response.json(), None
+        elif response.status_code == 401 or response.status_code == 403:
+            return None, f"Autenticação Negada ({response.status_code}): O Token é inválido ou o certificado não tem permissão de Importador."
+        elif response.status_code == 404:
+            return None, f"Recurso não encontrado (404): A URL ou o número {numero_duimp} não foram localizados pelo Siscomex."
         else:
-            # Melhora a exibição do erro 404 para diagnóstico
             try:
                 error_data = response.json()
                 msg = error_data.get('message', response.text)
@@ -109,27 +114,31 @@ def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password, token):
 st.title("🚢 Siscomex Gateway | Consulta DUIMP")
 st.markdown("---")
 
-# Sidebar para Autenticação e Configuração
 with st.sidebar:
     st.header("🔐 Autenticação A1")
-    uploaded_pfx = st.file_uploader("Carregar Certificado (.pfx)", type=["pfx", "p12"])
-    pfx_password = st.text_input("Senha do Certificado", type="password")
+    uploaded_pfx = st.file_uploader("1. Carregar Certificado (.pfx)", type=["pfx", "p12"])
+    pfx_password = st.text_input("2. Senha do Certificado", type="password")
+    
+    st.divider()
+    st.header("🔑 Acesso ao Portal")
+    api_token = st.text_input("3. Token de Acesso", type="password", help="Obtenha no Portal Único em 'Gerar Token de Acesso'")
+    
+    if not api_token:
+        st.warning("⚠️ O Token é obrigatório para evitar erros 404/403.")
     
     st.divider()
     st.header("⚙️ Configuração")
     ambiente = st.radio("Ambiente", ["Produção", "Treinamento"])
-    api_token = st.text_input("Token de Acesso (Opcional)", type="password", help="Token gerado no Portal Único")
     
     st.divider()
-    numero_duimp = st.text_input("Número da DUIMP", placeholder="Ex: 24BR00001234567").upper()
+    numero_duimp = st.text_input("Número da DUIMP", placeholder="Ex: 26BR00001720636").upper().strip()
     btn_consultar = st.button("Executar Consulta Real", type="primary")
 
-# Área Principal de Resultados
 if btn_consultar:
-    if not uploaded_pfx or not pfx_password or not numero_duimp:
-        st.error("⚠️ Por favor, preencha o certificado, a senha e o número da DUIMP.")
+    if not uploaded_pfx or not pfx_password or not numero_duimp or not api_token:
+        st.error("⚠️ Preencha todos os campos: Certificado, Senha, Token e Número DUIMP.")
     else:
-        with st.spinner("🔒 Autenticando com Certificado Digital e Consultando Siscomex..."):
+        with st.spinner("🔒 Conectando ao Siscomex..."):
             dados, erro = consultar_siscomex(
                 numero_duimp, 
                 ambiente, 
@@ -140,14 +149,11 @@ if btn_consultar:
 
             if erro:
                 st.error(f"❌ Falha na Consulta: {erro}")
-                st.info("Dica: Verifique se o número da DUIMP está correto e se o Token de Acesso é válido para este ambiente.")
+                st.info("Nota: Certifique-se de que a DUIMP foi registrada no ambiente de Produção antes de consultar.")
             elif dados:
-                st.success("✅ Dados recuperados com sucesso!")
+                st.success("✅ Dados recuperados!")
                 
-                # Dashboard de Métricas
                 col1, col2, col3 = st.columns(3)
-                
-                # Tratamento de dados aninhados para evitar erros de exibição
                 ident = dados.get('identificacao', {})
                 carga = dados.get('carga', {})
                 
@@ -157,40 +163,27 @@ if btn_consultar:
                 valor_total = sum(item.get('valorDolar', 0) for item in dados.get('itens', []))
                 col3.metric("Valor Total (USD)", f"$ {valor_total:,.2f}")
 
-                # Organização por Tabs
-                tab1, tab2, tab3 = st.tabs(["📋 Resumo Operacional", "📦 Itens da Mercadoria", "🛠️ JSON Bruto"])
+                tab1, tab2, tab3 = st.tabs(["📋 Resumo", "📦 Itens", "🛠️ JSON Bruto"])
 
                 with tab1:
-                    st.subheader("Dados de Identificação e Carga")
                     df_resumo = pd.DataFrame([
                         {"Campo": "Número DUIMP", "Valor": ident.get('numero', 'N/A')},
                         {"Campo": "Data Registro", "Valor": ident.get('dataRegistro', 'N/A')},
                         {"Campo": "Unidade Aduaneira", "Valor": carga.get('uol', 'N/A')},
-                        {"Campo": "Via Transporte", "Valor": carga.get('viaTransporte', 'N/A')},
-                        {"Campo": "Incoterm", "Valor": carga.get('incoterm', 'N/A')}
+                        {"Campo": "Via Transporte", "Valor": carga.get('viaTransporte', 'N/A')}
                     ])
                     st.table(df_resumo)
 
                 with tab2:
-                    st.subheader("Itens e NCMs")
                     if 'itens' in dados:
-                        df_itens = pd.json_normalize(dados['itens'])
-                        st.dataframe(df_itens, use_container_width=True)
+                        st.dataframe(pd.json_normalize(dados['itens']), use_container_width=True)
                     else:
-                        st.info("Nenhum item detalhado nesta declaração.")
+                        st.info("Sem itens detalhados.")
 
                 with tab3:
                     st.json(dados)
 else:
-    # Tela de Boas-vindas
-    st.info("👋 Aguardando dados. Preencha as informações na barra lateral para iniciar a consulta real.")
-    
-    st.markdown("""
-    ### 🛡️ Segurança e Privacidade
-    * **Processamento em Memória**: O seu arquivo PFX e a senha são processados apenas durante a execução da consulta.
-    * **Sem Armazenamento**: Os dados não são guardados em base de dados.
-    * **Conexão HTTPS**: O Streamlit Cloud garante que a comunicação entre o seu navegador e este servidor é criptografada.
-    """)
+    st.info("👋 Preencha os dados à esquerda para iniciar.")
 
 st.divider()
 st.caption(f"© {datetime.now().year} - Siscomex Gateway Integrador")
