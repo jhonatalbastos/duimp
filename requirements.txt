@@ -1,5 +1,5 @@
-streamlit
-requests
-pyopenssl
-pandas
-2.  **GitHub**: Faça o upload do `app.py` e do `requirements.txt` para um repositório (pode ser privado).
+```text
+   streamlit
+   requests
+   pyopenssl
+   pandas
