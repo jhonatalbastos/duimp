@@ -2,3 +2,4 @@ streamlit
 requests
 pyopenssl
 pandas
+cryptography
