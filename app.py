@@ -45,50 +45,52 @@ def extrair_pfx(pfx_data, password):
         raise Exception(f"Erro no Certificado: Verifique a senha. ({str(e)})")
 
 def obter_access_token(ambiente, cert_info=None):
-    """Troca Client ID/Secret por um Access Token, enviando mTLS se disponível."""
+    """Troca Client ID/Secret por um Access Token (OAUTH2)."""
+    # URLs exatas para o fluxo de autenticação do Portal Único
     if ambiente == "Treinamento":
-        url = "https://val.portalunico.siscomex.gov.br/api/autenticacao/token"
+        url = "https://val.portalunico.siscomex.gov.br/portal/api/autenticacao/token"
     else:
-        url = "https://portalunico.siscomex.gov.br/api/autenticacao/token"
+        url = "https://portalunico.siscomex.gov.br/portal/api/autenticacao/token"
     
     auth_str = f"{CLIENT_ID_SEC}:{CLIENT_SECRET_SEC}"
     auth_b64 = base64.b64encode(auth_str.encode()).decode()
     
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
-        "Authorization": f"Basic {auth_b64}"
+        "Authorization": f"Basic {auth_b64}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) SiscomexGateway/1.0"
     }
     
     payload = {"grant_type": "client_credentials"}
     
     try:
-        # Tenta autenticar enviando o certificado (mTLS), que resolve o erro 403 em muitos casos
+        # A autenticação mTLS é mandatória em Produção
         response = requests.post(
             url, 
             data=payload, 
             headers=headers, 
             cert=cert_info, 
-            timeout=15
+            timeout=15,
+            verify=True
         )
         
         if response.status_code == 200:
             return response.json().get("access_token"), None
         
-        # Caso 404, tenta a rota alternativa
-        if response.status_code == 404:
-            url_alt = url.replace("/api/", "/portal/api/")
-            response = requests.post(url_alt, data=payload, headers=headers, cert=cert_info, timeout=15)
-            if response.status_code == 200:
-                return response.json().get("access_token"), None
+        # Tenta URL sem o /portal se der 404/403
+        if response.status_code in [403, 404]:
+            url_alt = url.replace("/portal/api/", "/api/")
+            response_alt = requests.post(url_alt, data=payload, headers=headers, cert=cert_info, timeout=15)
+            if response_alt.status_code == 200:
+                return response_alt.json().get("access_token"), None
 
-        return None, f"Erro na geração do Token ({response.status_code}). Verifique se o ambiente (Produção/Treinamento) condiz com a chave gerada."
+        return None, f"Erro na geração do Token ({response.status_code}): {response.text[:200]}"
     except Exception as e:
         return None, f"Falha de conexão para Token: {str(e)}"
 
 def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password):
     """Consulta a DUIMP usando mTLS + Access Token."""
     try:
-        # Extrair certificado uma vez para usar em ambas as chamadas
         cert_pem, key_pem = extrair_pfx(pfx_data, pfx_password)
         
         with tempfile.NamedTemporaryFile(delete=False, suffix='.crt') as cert_file, \
@@ -101,7 +103,7 @@ def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password):
             
             cert_info = (cert_file.name, key_file.name)
 
-            # 1. Obter o Token usando mTLS
+            # 1. Obter o Token
             token, erro_token = obter_access_token(ambiente, cert_info)
             if erro_token:
                 os.unlink(cert_file.name)
@@ -109,15 +111,17 @@ def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password):
                 return None, erro_token
 
             # 2. Consultar DUIMP
-            base_url = "https://portalunico.siscomex.gov.br/duimp/api/duimps"
             if ambiente == "Treinamento":
                 base_url = "https://val.portalunico.siscomex.gov.br/duimp/api/duimps"
+            else:
+                base_url = "https://portalunico.siscomex.gov.br/duimp/api/duimps"
             
             url = f"{base_url}/{numero_duimp}"
             headers = {
                 "Accept": "application/json",
                 "Role-Type": "IMP",
-                "Authorization": f"Bearer {token}"
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "Mozilla/5.0 SiscomexGateway/1.0"
             }
 
             response = requests.get(url, headers=headers, cert=cert_info, timeout=30)
@@ -127,7 +131,7 @@ def consultar_siscomex(numero_duimp, ambiente, pfx_data, pfx_password):
 
         if response.status_code == 200:
             return response.json(), None
-        return None, f"Erro Siscomex ({response.status_code}): {response.text}"
+        return None, f"Erro Siscomex ({response.status_code}): {response.text[:200]}"
 
     except Exception as e:
         return None, str(e)
@@ -145,7 +149,8 @@ with st.sidebar:
     st.info("✅ **Autenticação API Ativa:** Credenciais configuradas internamente.")
     
     st.header("⚙️ Configuração")
-    ambiente = st.radio("Ambiente", ["Produção", "Treinamento"], help="Certifique-se de que a sua chave foi gerada no ambiente selecionado.")
+    # No seu print anterior, o perfil ativo era Produção (PRD)
+    ambiente = st.radio("Ambiente", ["Produção", "Treinamento"])
     
     st.divider()
     numero_duimp = st.text_input("Número da DUIMP", placeholder="Ex: 26BR00001720636").upper().strip()
@@ -155,11 +160,13 @@ if btn_consultar:
     if not uploaded_pfx or not pfx_password or not numero_duimp:
         st.error("⚠️ Preencha o certificado, a senha e o número da DUIMP.")
     else:
-        with st.spinner("🔒 Autenticando com mTLS e Consultando..."):
+        with st.spinner("🔒 Autenticando e Consultando..."):
             dados, erro = consultar_siscomex(numero_duimp, ambiente, uploaded_pfx.read(), pfx_password)
 
             if erro:
                 st.error(f"❌ Falha: {erro}")
+                if "403" in erro:
+                    st.warning("Dica: Verifique se o seu Certificado A1 está cadastrado no Portal Único e se você gerou as chaves no ambiente de Produção.")
             elif dados:
                 st.success("✅ Sucesso!")
                 ident = dados.get('identificacao', {})
